@@ -127,7 +127,7 @@ const statusBox = blessed.box({
   top: 7,
   left: 0,
   width: '50%',
-  height: 10,
+  height: 9,
   label: ' {cyan-fg}System Status{/cyan-fg} ',
   tags: true,
   style: {
@@ -149,8 +149,7 @@ function updateSystemStatus() {
     `  Platform:  {green-fg}${os.platform()} ${os.arch()}{/green-fg}\n` +
     `  Memory:    {green-fg}${used}MB / ${total}MB{/green-fg}\n` +
     `  Load Avg:  {green-fg}${os.loadavg().map(n => n.toFixed(2)).join(', ')}{/green-fg}\n` +
-    `  CPUs:      {green-fg}${os.cpus().length}{/green-fg}\n` +
-    `  Endpoint:  {yellow-fg}${process.env.BASE_URL}{/yellow-fg}` +
+    `  CPUs:      {green-fg}${os.cpus().length}{/green-fg}` +
     '{/white-fg}{/bold}'
   );
 }
@@ -162,7 +161,7 @@ const metricsBox = blessed.box({
   top: 7,
   left: '50%',
   width: '50%',
-  height: 10,
+  height: 9,
   label: ' {cyan-fg}Metrics{/cyan-fg} ',
   tags: true,
   style: {
@@ -187,9 +186,7 @@ function updateMetrics() {
     `  Success:       {green-fg}${successes}{/green-fg}\n` +
     `  Failures:      {red-fg}${failures}{/red-fg}\n` +
     `  Success Rate:  {${rateColor}-fg}${rate}%{/${rateColor}-fg}\n` +
-    `  Avg Response:  {green-fg}${avg}ms{/green-fg}\n` +
-    '\n' +
-    `  {cyan-fg}[q] Quit  [r] Refresh  [Esc] Exit{/cyan-fg}` +
+    `  Avg Response:  {green-fg}${avg}ms{/green-fg}` +
     '{/white-fg}{/bold}'
   );
 }
@@ -198,10 +195,10 @@ function updateMetrics() {
 
 const log = blessed.log({
   parent: screen,
-  top: 17,
+  top: 16,
   left: 0,
   width: '100%',
-  bottom: 5,
+  bottom: 3,
   label: ' {cyan-fg}Tool Execution Log{/cyan-fg} ',
   tags: true,
   scrollable: true,
@@ -235,7 +232,7 @@ const commandBox = blessed.box({
   bottom: 0,
   left: 0,
   width: '100%',
-  height: 5,
+  height: 3,
   label: ' {bold}{cyan-fg}COMMAND{/cyan-fg}{/bold} ',
   tags: true,
   style: {
@@ -252,7 +249,7 @@ const commandInput = blessed.textbox({
   top: 0,
   left: 1,
   right: 1,
-  height: 3,
+  height: 1,
   inputOnFocus: true,
   keys: true,
   mouse: true,
@@ -292,8 +289,13 @@ screen.key(['r'], () => {
   }
 });
 
-// Escape and Ctrl+C always quit
-screen.key(['escape', 'C-c'], () => {
+// Escape — quit only when input is NOT focused (so typing Escape doesn't kill the app)
+screen.key(['escape'], () => {
+  if (!inputFocused) cleanup();
+});
+
+// Ctrl+C — always quit
+screen.key(['C-c'], () => {
   cleanup();
 });
 
@@ -308,15 +310,17 @@ function cleanup() {
 
 // ─── Command Submission ─────────────────────────────────────────────────────
 
-commandInput.on('submit', async (value) => {
+commandInput.on('submit', (value) => {
   const input = (value || '').trim();
   commandInput.clearValue();
 
-  if (!input) {
-    commandInput.focus();
+  // Re-enter reading mode on next tick (after blessed's internal _done cleanup)
+  process.nextTick(() => {
+    commandInput.readInput();
     screen.render();
-    return;
-  }
+  });
+
+  if (!input) return;
 
   // Built-in commands
   if (input === '/quit' || input === '/exit') {
@@ -327,7 +331,6 @@ commandInput.on('submit', async (value) => {
   if (input === '/clear') {
     log.setContent('');
     appendLog('{yellow-fg}Log cleared.{/yellow-fg}');
-    commandInput.focus();
     screen.render();
     return;
   }
@@ -339,7 +342,6 @@ commandInput.on('submit', async (value) => {
     appendLog('{white-fg}  /quit    — Exit the dashboard{/white-fg}');
     appendLog('{white-fg}  <text>   — Send to QueryEngine endpoint{/white-fg}');
     appendLog('{cyan-fg}────────────────────────────{/cyan-fg}');
-    commandInput.focus();
     screen.render();
     return;
   }
@@ -349,24 +351,22 @@ commandInput.on('submit', async (value) => {
   appendLog('{yellow-fg}Processing...{/yellow-fg}');
   screen.render();
 
-  const response = await QueryEngine.run(input);
-
-  // Format the response — indent multi-line responses
-  const lines = response.split('\n');
-  for (const line of lines) {
-    appendLog(`{green-fg}  ${blessed.escape(line)}{/green-fg}`);
-  }
-
-  updateMetrics();
-  commandInput.focus();
-  screen.render();
+  QueryEngine.run(input).then((response) => {
+    const lines = response.split('\n');
+    for (const line of lines) {
+      appendLog(`{green-fg}  ${blessed.escape(line)}{/green-fg}`);
+    }
+    updateMetrics();
+    screen.render();
+  });
 });
 
 // Re-focus input when cancel (e.g., pressing Escape inside textbox)
 commandInput.on('cancel', () => {
-  // Do not exit — just re-focus
-  commandInput.focus();
-  screen.render();
+  process.nextTick(() => {
+    commandInput.readInput();
+    screen.render();
+  });
 });
 
 // ─── Resize Handling ────────────────────────────────────────────────────────
@@ -393,6 +393,7 @@ appendLog('{bold}{cyan-fg}║  Type a command and press Enter to execute.      �
 appendLog('{bold}{cyan-fg}║  Type /help for available commands.              ║{/cyan-fg}{/bold}');
 appendLog('{bold}{cyan-fg}╚══════════════════════════════════════════════════╝{/cyan-fg}{/bold}');
 
-// Focus the command input
+// Focus the command input and enter reading mode
 commandInput.focus();
+commandInput.readInput();
 screen.render();
