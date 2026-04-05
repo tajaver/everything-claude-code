@@ -67,6 +67,7 @@
     "scripts/hooks/",
     "scripts/lib/",
     "scripts/claw.js",
+    "scripts/tui.mjs",
     "scripts/setup-package-manager.js",
     "scripts/skill-create-output.js",
     "skills/",
@@ -83,7 +84,12 @@
     "postinstall": "echo '\\n  ecc-universal installed!\\n  Run: npx ecc-install typescript\\n  Docs: https://github.com/affaan-m/everything-claude-code\\n'",
     "lint": "eslint . && markdownlint '**/*.md' --ignore node_modules",
     "claw": "node scripts/claw.js",
+    "tui": "node scripts/tui.mjs",
     "test": "node scripts/ci/validate-agents.js && node scripts/ci/validate-commands.js && node scripts/ci/validate-rules.js && node scripts/ci/validate-skills.js && node scripts/ci/validate-hooks.js && node tests/run-all.js"
+  },
+  "dependencies": {
+    "blessed": "^0.1.81",
+    "dotenv": "^16.4.7"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.2",
