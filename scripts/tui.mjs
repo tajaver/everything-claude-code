@@ -24,7 +24,7 @@ if (!process.env.BASE_URL) {
   process.exit(1);
 }
 
-// ─── QueryEngine ────────────────────────────────────────────────────────────
+// ─── QueryEngine (dual-mode: OpenAI-compatible + Ollama native) ─────────────
 
 const QueryEngine = {
   metrics: { count: 0, successes: 0, failures: 0, totalTime: 0 },
@@ -32,6 +32,7 @@ const QueryEngine = {
   async run(input) {
     const start = Date.now();
     this.metrics.count++;
+    const mode = (process.env.ENDPOINT_MODE || 'openai').toLowerCase();
 
     try {
       const headers = { 'Content-Type': 'application/json' };
@@ -39,21 +40,41 @@ const QueryEngine = {
         headers['Authorization'] = `Bearer ${process.env.API_KEY}`;
       }
 
-      const res = await fetch(`${process.env.BASE_URL}/v1/chat/completions`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
+      let url;
+      let body;
+
+      if (mode === 'ollama') {
+        // Ollama native endpoint: POST /api/generate
+        url = `${process.env.BASE_URL}/api/generate`;
+        body = JSON.stringify({
+          model: process.env.MODEL || 'llama3',
+          prompt: input,
+          stream: false
+        });
+      } else {
+        // OpenAI-compatible endpoint: POST /v1/chat/completions
+        url = `${process.env.BASE_URL}/v1/chat/completions`;
+        body = JSON.stringify({
           model: process.env.MODEL || 'default',
           messages: [{ role: 'user', content: input }]
-        })
-      });
+        });
+      }
+
+      const res = await fetch(url, { method: 'POST', headers, body });
 
       if (!res.ok) {
         throw new Error(`HTTP ${res.status} ${res.statusText}`);
       }
 
       const data = await res.json();
-      const text = data.choices?.[0]?.message?.content || JSON.stringify(data);
+
+      // Parse response based on mode
+      let text;
+      if (mode === 'ollama') {
+        text = data.response || JSON.stringify(data);
+      } else {
+        text = data.choices?.[0]?.message?.content || JSON.stringify(data);
+      }
 
       this.metrics.successes++;
       this.metrics.totalTime += Date.now() - start;
@@ -139,17 +160,28 @@ const statusBox = blessed.box({
   border: { type: 'line' }
 });
 
+// ─── Keypress Debug ─────────────────────────────────────────────────────────
+
+let lastKey = '(none)';
+
+screen.on('keypress', (ch, key) => {
+  lastKey = key.full || key.name || ch || '?';
+  updateSystemStatus();
+  screen.render();
+});
+
 function updateSystemStatus() {
   const used = Math.round((os.totalmem() - os.freemem()) / 1048576);
   const total = Math.round(os.totalmem() / 1048576);
+  const mode = (process.env.ENDPOINT_MODE || 'openai').toLowerCase();
   statusBox.setContent(
     '{bold}{white-fg}' +
     `  Uptime:    {green-fg}${formatUptime(os.uptime())}{/green-fg}\n` +
     `  Node:      {green-fg}${process.version}{/green-fg}\n` +
     `  Platform:  {green-fg}${os.platform()} ${os.arch()}{/green-fg}\n` +
     `  Memory:    {green-fg}${used}MB / ${total}MB{/green-fg}\n` +
-    `  Load Avg:  {green-fg}${os.loadavg().map(n => n.toFixed(2)).join(', ')}{/green-fg}\n` +
-    `  CPUs:      {green-fg}${os.cpus().length}{/green-fg}` +
+    `  Endpoint:  {yellow-fg}${mode}{/yellow-fg}\n` +
+    `  Last Key:  {cyan-fg}${lastKey}{/cyan-fg}` +
     '{/white-fg}{/bold}'
   );
 }
@@ -191,9 +223,16 @@ function updateMetrics() {
   );
 }
 
-// ─── Tool Execution Log ─────────────────────────────────────────────────────
+// ─── Tool Execution Log (blessed.box + manual buffer, NOT blessed.log) ──────
+//
+// blessed.log with tags:true has a _pcontent cache bug in v0.1.81 where
+// pushLine/insertLine calls don't invalidate the tag-parsed render cache.
+// Using a plain box with setContent() forces a full re-parse every time.
 
-const log = blessed.log({
+const logLines = [];
+const MAX_LOG_LINES = 500;
+
+const logBox = blessed.box({
   parent: screen,
   top: 16,
   left: 0,
@@ -208,8 +247,8 @@ const log = blessed.log({
     style: { fg: 'cyan' }
   },
   mouse: true,
-  keys: true,
-  vi: true,
+  // NO keys: true — prevents log from stealing keyboard events
+  // NO vi: true   — prevents j/k intercepting during focus transitions
   style: {
     fg: 'green',
     bg: 'black',
@@ -221,7 +260,12 @@ const log = blessed.log({
 });
 
 function appendLog(text) {
-  log.log(`{white-fg}[${timestamp()}]{/white-fg} ${text}`);
+  logLines.push(`{white-fg}[${timestamp()}]{/white-fg} ${text}`);
+  if (logLines.length > MAX_LOG_LINES) logLines.shift();
+  // setContent() forces full parseContent() → _parseTags() → _pcontent rebuild.
+  // This sidesteps the blessed.log cache bug entirely.
+  logBox.setContent(logLines.join('\n'));
+  logBox.setScrollPerc(100);
   screen.render();
 }
 
@@ -260,6 +304,11 @@ const commandInput = blessed.textbox({
   }
 });
 
+// ─── Z-Index: bring log and command bar to front ────────────────────────────
+
+logBox.setFront();
+commandBox.setFront();
+
 // ─── Focus Management & Key Bindings ────────────────────────────────────────
 
 let inputFocused = false;
@@ -274,9 +323,7 @@ commandInput.on('blur', () => {
 
 // Global 'q' — quit only when input is NOT focused
 screen.key(['q'], () => {
-  if (!inputFocused) {
-    cleanup();
-  }
+  if (!inputFocused) cleanup();
 });
 
 // Global 'r' — refresh only when input is NOT focused
@@ -289,7 +336,7 @@ screen.key(['r'], () => {
   }
 });
 
-// Escape — quit only when input is NOT focused (so typing Escape doesn't kill the app)
+// Escape — quit only when input is NOT focused
 screen.key(['escape'], () => {
   if (!inputFocused) cleanup();
 });
@@ -314,6 +361,11 @@ commandInput.on('submit', (value) => {
   const input = (value || '').trim();
   commandInput.clearValue();
 
+  // ── INSTANT FEEDBACK: log the raw input FIRST, before ANY logic ──
+  if (input) {
+    appendLog(`{bold}{white-fg}> ${blessed.escape(input)}{/white-fg}{/bold}`);
+  }
+
   // Re-enter reading mode on next tick (after blessed's internal _done cleanup)
   process.nextTick(() => {
     commandInput.readInput();
@@ -329,7 +381,8 @@ commandInput.on('submit', (value) => {
   }
 
   if (input === '/clear') {
-    log.setContent('');
+    logLines.length = 0;
+    logBox.setContent('');
     appendLog('{yellow-fg}Log cleared.{/yellow-fg}');
     screen.render();
     return;
@@ -347,7 +400,6 @@ commandInput.on('submit', (value) => {
   }
 
   // Send to QueryEngine
-  appendLog(`{bold}{white-fg}> ${blessed.escape(input)}{/white-fg}{/bold}`);
   appendLog('{yellow-fg}Processing...{/yellow-fg}');
   screen.render();
 
@@ -387,11 +439,13 @@ setInterval(() => {
 }, 5000);
 
 // Welcome messages
+const mode = (process.env.ENDPOINT_MODE || 'openai').toLowerCase();
 appendLog('{bold}{cyan-fg}╔══════════════════════════════════════════════════╗{/cyan-fg}{/bold}');
 appendLog('{bold}{cyan-fg}║  GEAR / TONIDOBOT Dashboard v1.0                ║{/cyan-fg}{/bold}');
 appendLog('{bold}{cyan-fg}║  Type a command and press Enter to execute.      ║{/cyan-fg}{/bold}');
 appendLog('{bold}{cyan-fg}║  Type /help for available commands.              ║{/cyan-fg}{/bold}');
 appendLog('{bold}{cyan-fg}╚══════════════════════════════════════════════════╝{/cyan-fg}{/bold}');
+appendLog(`{white-fg}Endpoint: {yellow-fg}${process.env.BASE_URL}{/yellow-fg} (mode: {cyan-fg}${mode}{/cyan-fg}){/white-fg}`);
 
 // Focus the command input and enter reading mode
 commandInput.focus();
